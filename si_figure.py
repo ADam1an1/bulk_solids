@@ -40,9 +40,9 @@ def irreducible_kpoints(mesh=(6, 6, 6)):
     return frac @ B_REC
 
 
-def _kpoints(path):
+def _kpoints(path, mesh=(6, 6, 6)):
     """k-points from a pw.x output if one exists (and is consistent), else from spglib."""
-    kpts = irreducible_kpoints()
+    kpts = irreducible_kpoints(mesh)
     if path and Path(path).exists():
         txt = Path(path).read_text()
         n = int(re.search(r"number of k points=\s+(\d+)", txt).group(1))
@@ -61,7 +61,7 @@ def _g_vectors(nmax=22):
 def plane_wave_counts(a_bohr=10.26, ecutwfc=30.0, ecutrho=None, kpts=None):
     ecutrho = ecutrho or 4 * ecutwfc
     tpiba2 = (2 * np.pi / a_bohr) ** 2                 # Ry per (2pi/a)^2, since E[Ry] = |q|^2 [bohr^-2]
-    G = _g_vectors()
+    G = _g_vectors(int(0.71 * np.sqrt(ecutrho / tpiba2)) + 2)   # n_i = G.a_i, and |a_i| = a/sqrt(2)
     kpts = np.zeros((1, 3)) if kpts is None else kpts
     npw_k = [int((((G + k) ** 2).sum(1) * tpiba2 <= ecutwfc).sum()) for k in kpts]
     n_rho = int(((G ** 2).sum(1) * tpiba2 <= ecutrho).sum())
@@ -122,23 +122,27 @@ def _structure_panel(ax, a_bohr):
     ax.set_title("A   Diamond silicon as built from the input", loc="left", fontsize=11, weight="bold", color=INK)
 
 
-def _mapping_panel(ax, a_bohr, ecutwfc, counts, vol):
+def _mapping_panel(ax, a_bohr, ecutwfc, counts, vol, mesh, fft, relaxed):
     ax.set_axis_off()
     ax.set_title("B   What each hard-coded constant sets", loc="left", fontsize=11, weight="bold", color=INK)
+    source = "relaxed" if relaxed else "≈ experiment"
+    ratio = counts["ecutrho"] / ecutwfc
+    rho_key = "ecutrho (default)" if ratio == 4 else f"ecutrho = {counts['ecutrho']:g} Ry"
     rows = [
         ("ibrav = 2", "FCC Bravais lattice. QE generates",
          "a₁ = a/2(−1,0,1)  a₂ = a/2(0,1,1)  a₃ = a/2(−1,1,0)"),
-        ("celldm(1) = 10.26", f"a, the cubic edge: {a_bohr:g} bohr = {a_bohr * BOHR_A:.2f} Å (≈ experiment)",
+        (f"celldm(1) = {a_bohr:g}", f"a, the cubic edge: {a_bohr:g} bohr = {a_bohr * BOHR_A:.2f} Å ({source})",
          f"primitive-cell volume a³/4 = {vol:.1f} bohr³"),
         ("nat = 2", "atoms per primitive cell: one per FCC sublattice", "(the conventional cube would hold 8)"),
         ("ntyp = 1", "one species, Si 28.086 u, Si.pz-vbc.UPF", "LDA (SLA PZ), 4 valence e⁻ per atom"),
         ("ATOMIC_POSITIONS (alat)", "Si₁ (0, 0, 0)    Si₂ (0.25, 0.25, 0.25) × a", "Si₂ = Si₁ shifted ¼ of the cube diagonal"),
         ("nbnd = 8", "2 atoms × 4 e⁻ = 8 e⁻ → 4 filled bands", "+4 empty bands, so the gap can be read off"),
-        ("K_POINTS 6 6 6 0 0 0", "6×6×6 = 216 k-points in the Brillouin zone", f"→ {len(counts['npw_k'])} after symmetry"),
-        ("ecutwfc = 30 Ry", "ψ basis: plane waves with |k+G|² ≤ 30 Ry",
+        (f"K_POINTS {mesh[0]} {mesh[1]} {mesh[2]} 0 0 0", f"{mesh[0]}×{mesh[1]}×{mesh[2]} = {np.prod(mesh)} k-points in the Brillouin zone",
+         f"→ {len(counts['npw_k'])} after symmetry"),
+        (f"ecutwfc = {ecutwfc:g} Ry", f"ψ basis: plane waves with |k+G|² ≤ {ecutwfc:g} Ry",
          f"→ {min(counts['npw_k'])}–{max(counts['npw_k'])} plane waves per k-point"),
-        ("ecutrho (default)", f"4 × ecutwfc = {counts['ecutrho']:g} Ry, for ρ = Σ|ψ|²",
-         f"→ {counts['n_rho']} G-vectors, FFT grid 32×32×32"),
+        (rho_key, f"{ratio:g} × ecutwfc = {counts['ecutrho']:g} Ry, for ρ = Σ|ψ|²",
+         f"→ {counts['n_rho']} G-vectors, FFT grid {fft}×{fft}×{fft}"),
     ]
     y = 0.95
     for key, l1, l2 in rows:
@@ -152,7 +156,7 @@ def _mapping_panel(ax, a_bohr, ecutwfc, counts, vol):
 def _reciprocal_panel(ax, a_bohr, ecutwfc, counts):
     tpiba2 = counts["tpiba2"]
     r_wf, r_rho = np.sqrt(ecutwfc / tpiba2), np.sqrt(counts["ecutrho"] / tpiba2)
-    G = _g_vectors()
+    G = _g_vectors(int(1.25 * r_rho))                  # also fills the corners of the plot
     plane = G[np.isclose(G[:, 0], G[:, 1])]            # (1-10) plane through Gamma: contains [001], [110], [111]
     u, v = plane[:, 0] * np.sqrt(2), plane[:, 2]
     g2 = (plane ** 2).sum(1)
@@ -169,7 +173,7 @@ def _reciprocal_panel(ax, a_bohr, ecutwfc, counts):
                 (r_wf * 0.707, r_wf * 0.707), xytext=(r_wf * 0.35, r_rho * 0.62), fontsize=8.5, color=INK,
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=BLUE, lw=1),
                 arrowprops=dict(arrowstyle="-", color=BLUE, lw=1))
-    ax.annotate(f"|G|² ≤ ecutrho = 4·ecutwfc = {counts['ecutrho']:g} Ry\n→ ρ uses {counts['n_rho']} G-vectors",
+    ax.annotate(f"|G|² ≤ ecutrho = {counts['ecutrho'] / ecutwfc:g}·ecutwfc = {counts['ecutrho']:g} Ry\n→ ρ uses {counts['n_rho']} G-vectors",
                 (-r_rho * 0.707, r_rho * 0.707), xytext=(-lim * 0.97, lim * 0.97), fontsize=8.5, color=INK,
                 va="top", bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=AQUA, lw=1),
                 arrowprops=dict(arrowstyle="-", color=AQUA, lw=1))
@@ -191,7 +195,7 @@ def _reciprocal_panel(ax, a_bohr, ecutwfc, counts):
             transform=ax.transAxes, fontsize=8.5, color=INK, va="bottom")
 
 
-def _cutoff_panel(ax, a_bohr):
+def _cutoff_panel(ax, a_bohr, ecutwfc):
     # 1-D illustration along the [111] line: period sqrt(3)*a, atoms at 0 and 1/4 of it
     L = np.sqrt(3) * a_bohr
     x = np.linspace(0, L, 1200)
@@ -202,9 +206,9 @@ def _cutoff_panel(ax, a_bohr):
     coef = sum(np.exp(-0.5 * (sig * g) ** 2) * np.exp(-1j * g * c) for c in centers) * sig * np.sqrt(2 * np.pi) / L
     f = lambda emax: np.real(np.exp(1j * np.outer(x, g[g ** 2 <= emax])) @ coef[g ** 2 <= emax])
     exact = f(1e9)
-    for emax, c in zip([3, 10, 30], SEQ):
+    for emax, c in zip([3, 10, ecutwfc], SEQ):
         n = int((g ** 2 <= emax).sum())
-        ax.plot(x / L, f(emax), color=c, lw=2, label=f"cutoff {emax} Ry  ({n} plane waves)")
+        ax.plot(x / L, f(emax), color=c, lw=2, label=f"cutoff {emax:g} Ry  ({n} plane waves)")
     ax.plot(x / L, exact, color=INK, lw=1.4, ls=(0, (4, 3)), label="target function")
     for c, lab, col in [(0, "Si$_1$", BLUE), (0.25, "Si$_2$", ORANGE), (1, "Si$_1$", BLUE)]:
         ax.scatter([c], [-0.24], s=70, color=col, edgecolor="white", lw=1.5, zorder=5)
@@ -224,9 +228,9 @@ def _cutoff_panel(ax, a_bohr):
             transform=ax.transAxes, fontsize=8.5, color=INK, va="bottom")
 
 
-def make_si_figure(pw_output=None, a_bohr=10.26, ecutwfc=30.0):
-    kpts, txt = _kpoints(pw_output)
-    counts = plane_wave_counts(a_bohr, ecutwfc, kpts=kpts)
+def make_si_figure(pw_output=None, a_bohr=10.26, ecutwfc=30.0, ecutrho=None, mesh=(6, 6, 6), fft=32, relaxed=False):
+    kpts, txt = _kpoints(pw_output, mesh)
+    counts = plane_wave_counts(a_bohr, ecutwfc, ecutrho, kpts=kpts)
     vol = abs(np.linalg.det(A_PRIM)) * a_bohr ** 3
     if txt:  # cross-check against pw.x
         m = re.search(r"Dense\s+grid:\s+(\d+) G-vectors", txt)
@@ -240,9 +244,9 @@ def make_si_figure(pw_output=None, a_bohr=10.26, ecutwfc=30.0):
     gs = fig.add_gridspec(2, 2, width_ratios=[1, 1.05], height_ratios=[1, 1], hspace=0.32, wspace=0.12,
                           left=0.04, right=0.98, top=0.95, bottom=0.06)
     _structure_panel(fig.add_subplot(gs[0, 0], projection="3d"), a_bohr)
-    _mapping_panel(fig.add_subplot(gs[0, 1]), a_bohr, ecutwfc, counts, vol)
+    _mapping_panel(fig.add_subplot(gs[0, 1]), a_bohr, ecutwfc, counts, vol, mesh, fft, relaxed)
     _reciprocal_panel(fig.add_subplot(gs[1, 0]), a_bohr, ecutwfc, counts)
-    _cutoff_panel(fig.add_subplot(gs[1, 1]), a_bohr)
+    _cutoff_panel(fig.add_subplot(gs[1, 1]), a_bohr, ecutwfc)
     return fig, counts
 
 
